@@ -7,11 +7,11 @@
     "packages/*"
   ],
   "scripts": {
-    "dev:web": "cd apps/web && npm run dev",
-    "dev:api": "cd apps/api && cargo run",
-    "build:web": "cd apps/web && npm run build",
-    "build:api": "cd apps/api && cargo build --release",
-    "build:contract": "cd contracts/iot && cargo build --target wasm32-unknown-unknown --release",
+    "dev:web": "node init && cd apps/web && npm run dev",
+    "dev:api": "node init && cd apps/api && cargo run",
+    "build:web": "node init && cd apps/web && npm run build",
+    "build:api": "node init && cd apps/api && cargo build --release",
+    "build:contract": "node init && cd contracts/iot && cargo build --target wasm32-unknown-unknown --release",
     "test": "./scripts/test-all.sh",
     "setup": "./scripts/setup.sh",
     "deploy:contract": "./scripts/deploy-contract.sh"
