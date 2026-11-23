@@ -1,4 +1,5 @@
 use crate::analytics;
+use crate::auth;
 use crate::device_registry::{self, RegistryError};
 use crate::models::{
     AnalyticsQuery, DeviceSearchQuery, DeviceSearchResponse,
@@ -35,10 +36,13 @@ pub async fn process_payment(
             let session = services::create_session(payment.device_id, payment.user_address);
             // Record the payment so it appears in the user's transaction history.
             services::record_payment(&payment.tx_hash, payment.amount, &session);
+            // Issue a short-lived JWT granting device access for this session.
+            let token = auth::generate_device_token(&session);
             Ok(Json(PaymentResponse {
                 access_granted: true,
                 session_id: session.id,
                 expires_at: session.expires_at.to_rfc3339(),
+                token,
             }))
         }
         Ok(false) => {
@@ -84,10 +88,13 @@ pub async fn extend_session(
                 Ok(session) => {
                     // Record the extension as a payment in the user's history.
                     services::record_payment(&payment.tx_hash, payment.amount, &session);
+                    // Issue a refreshed JWT reflecting the extended expiry.
+                    let token = auth::generate_device_token(&session);
                     Ok(Json(PaymentResponse {
                         access_granted: true,
                         session_id: session.id,
                         expires_at: session.expires_at.to_rfc3339(),
+                        token,
                     }))
                 }
                 Err(_) => Err(StatusCode::NOT_FOUND),
@@ -101,6 +108,16 @@ pub async fn extend_session(
 /// End session.
 pub async fn end_session(Path(id): Path<String>) -> Result<StatusCode, StatusCode> {
     match services::end_session(&id) {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// `POST /session/:id/revoke` — revoke the access token for a session.
+///
+/// Used when a session ends or the owner explicitly requests revocation.
+pub async fn revoke_session_token(Path(id): Path<String>) -> Result<StatusCode, StatusCode> {
+    match services::revoke_session(&id) {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(_) => Err(StatusCode::NOT_FOUND),
     }
@@ -235,17 +252,43 @@ pub async fn device_heartbeat(
 }
 
 /// Process telemetry data ingestion.
+///
+/// Requires a valid device session JWT (via the `Authorization: Bearer <token>`
+/// header or the `token` field in the payload) that matches the target device.
 pub async fn upload_telemetry(
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(payload): Json<TelemetryUploadRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let _session = match services::get_session(&payload.session_id) {
+    // Prefer the Authorization header, falling back to the payload token.
+    let token = bearer_token(&headers).or(payload.token.clone());
+
+    let claims = match token.as_deref().map(auth::validate_device_token) {
+        Some(Ok(claims)) => claims,
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    // The token must grant access to this device and its session must be live.
+    if claims.device_id != id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let _session = match services::get_session(&claims.session_id) {
         Some(s) if s.active && s.device_id == id => s,
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
     services::ingest_telemetry(&id, payload.data);
     Ok(StatusCode::OK)
+}
+
+/// Extract a bearer token from the `Authorization` header, if present.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
 }
 
 pub async fn add_device_review(

@@ -1,7 +1,9 @@
 use axum::{extract::Query, http::StatusCode, Json};
 use chrono::Utc;
 use ed25519_dalek::{Signature, VerifyingKey};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{
+    decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,6 +31,95 @@ const CHALLENGE_TTL_SECS: i64 = 60;
 pub struct Claims {
     pub sub: String, // wallet address
     pub exp: usize,
+}
+
+/// Claims embedded in a device-session access token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceSessionClaims {
+    /// Identifier of the device the token grants access to.
+    pub device_id: String,
+    /// Stellar wallet address of the paying user.
+    pub user_address: String,
+    /// Identifier of the session this token belongs to.
+    pub session_id: String,
+    /// Issued-at time (unix seconds).
+    pub iat: usize,
+    /// Expiry time (unix seconds).
+    pub exp: usize,
+}
+
+/// Minimal session description needed to mint a device access token.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub device_id: String,
+    pub user_address: String,
+    pub session_id: String,
+    /// Token lifetime in seconds from now.
+    pub ttl_secs: i64,
+}
+
+/// Errors that can occur while generating or validating device tokens.
+#[derive(Debug)]
+pub enum TokenError {
+    Encode(jsonwebtoken::errors::Error),
+    Decode(jsonwebtoken::errors::Error),
+}
+
+impl std::fmt::Display for TokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenError::Encode(e) => write!(f, "token encoding failed: {e}"),
+            TokenError::Decode(e) => write!(f, "token decoding failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TokenError {}
+
+impl From<TokenError> for (StatusCode, &'static str) {
+    fn from(_: TokenError) -> Self {
+        (StatusCode::UNAUTHORIZED, "Invalid or expired access token")
+    }
+}
+
+/// Generate a short-lived JWT access token for a device session (HS256).
+pub fn generate_device_token(
+    session: &Session,
+    secret: &[u8],
+) -> Result<String, TokenError> {
+    let now = Utc::now().timestamp();
+    let claims = DeviceSessionClaims {
+        device_id: session.device_id.clone(),
+        user_address: session.user_address.clone(),
+        session_id: session.session_id.clone(),
+        iat: now as usize,
+        exp: (now + session.ttl_secs) as usize,
+    };
+
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(secret),
+    )
+    .map_err(TokenError::Encode)
+}
+
+/// Validate a device access token and return its claims.
+/// Verifies the signature and that the token has not expired.
+pub fn decode_device_token(
+    token: &str,
+    secret: &[u8],
+) -> Result<DeviceSessionClaims, TokenError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+
+    decode::<DeviceSessionClaims>(
+        token,
+        &DecodingKey::from_secret(secret),
+        &validation,
+    )
+    .map(|data| data.claims)
+    .map_err(TokenError::Decode)
 }
 
 fn jwt_secret() -> String {
@@ -125,10 +216,11 @@ pub async fn verify_challenge(
     // 5. Issue JWT (24h expiry)
     let exp = (Utc::now() + chrono::Duration::hours(24)).timestamp() as usize;
     let claims = Claims { sub: body.address, exp };
+    let secret = jwt_secret();
     let token = encode(
-        &Header::default(),
+        &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(jwt_secret().as_bytes()),
+        &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Token generation failed"))?;
 

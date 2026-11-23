@@ -9,3 +9,10 @@ CREATE TABLE sessions (
 
 CREATE INDEX idx_sessions_device_id    ON sessions(device_id);
 CREATE INDEX idx_sessions_user_address ON sessions(user_address);
+
+-- V6: session revocation and token metadata support
+ALTER TABLE sessions
+    ADD COLUMN revoked    BOOLEAN     NOT NULL DEFAULT FALSE,
+    ADD COLUMN revoked_at TIMESTAMPTZ;
+
+CREATE INDEX idx_sessions_revoked ON sessions(revoked);
