@@ -356,6 +356,12 @@ pub fn check_offline_devices() {
 lazy_static! {
     pub static ref SESSIONS: std::sync::RwLock<std::collections::HashMap<String, Session>> =
         std::sync::RwLock::new(std::collections::HashMap::new());
+
+    /// Sessions whose access tokens have been revoked (session ended or owner
+    /// requested revocation).  A revoked session can never be used again, even
+    /// if its `expires_at` is still in the future.
+    pub static ref REVOKED_SESSIONS: std::sync::RwLock<std::collections::HashSet<String>> =
+        std::sync::RwLock::new(std::collections::HashSet::new());
 }
 
 pub fn create_session(device_id: String, user_address: String) -> Session {
@@ -387,6 +393,9 @@ pub fn get_sessions_by_user(user_address: &str) -> Vec<Session> {
 }
 
 pub fn extend_session(id: &str, hours: i64) -> Result<Session, String> {
+    if is_session_revoked(id) {
+        return Err("Session has been revoked".to_string());
+    }
     let mut sessions = SESSIONS.write().unwrap();
     if let Some(session) = sessions.get_mut(id) {
         if !session.active || session.expires_at < chrono::Utc::now() {
@@ -400,13 +409,52 @@ pub fn extend_session(id: &str, hours: i64) -> Result<Session, String> {
 }
 
 pub fn end_session(id: &str) -> Result<(), String> {
+    revoke_session(id)
+}
+
+/// Revoke a session's access token.  Marks the session inactive (if it still
+/// exists) and records the revocation so any outstanding token is rejected.
+pub fn revoke_session(id: &str) -> Result<(), String> {
     let mut sessions = SESSIONS.write().unwrap();
-    if let Some(session) = sessions.get_mut(id) {
-        session.active = false;
-        Ok(())
-    } else {
-        Err("Session not found".to_string())
+    let session = sessions
+        .get_mut(id)
+        .ok_or_else(|| "Session not found".to_string())?;
+    session.active = false;
+    drop(sessions);
+
+    REVOKED_SESSIONS.write().unwrap().insert(id.to_string());
+    Ok(())
+}
+
+/// Returns `true` if the session's access token has been revoked.
+pub fn is_session_revoked(id: &str) -> bool {
+    REVOKED_SESSIONS.read().unwrap().contains(id)
+}
+
+/// Validate that a session is usable for the given device and user: it must
+/// exist, be active, not be expired, and not have been revoked.
+pub fn validate_session_access(
+    session_id: &str,
+    device_id: &str,
+    user_address: &str,
+) -> Result<Session, String> {
+    if is_session_revoked(session_id) {
+        return Err("Session has been revoked".to_string());
     }
+    let session = get_session(session_id).ok_or_else(|| "Session not found".to_string())?;
+    if session.device_id != device_id {
+        return Err("Session does not match device".to_string());
+    }
+    if session.user_address != user_address {
+        return Err("Session does not match user".to_string());
+    }
+    if !session.active {
+        return Err("Session is not active".to_string());
+    }
+    if session.expires_at <= chrono::Utc::now() {
+        return Err("Session has expired".to_string());
+    }
+    Ok(session)
 }
 
 lazy_static! {

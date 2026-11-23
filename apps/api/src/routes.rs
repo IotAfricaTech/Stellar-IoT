@@ -1,5 +1,5 @@
 use crate::auth;
-use crate::auth_middleware::require_auth;
+use crate::auth_middleware::{require_auth, require_device_session};
 use crate::handlers;
 use crate::webhook_handlers;
 use crate::webhook_service::WebhookStore;
@@ -20,6 +20,11 @@ pub fn device_routes() -> Router {
         .route("/devices/:id/analytics", get(handlers::get_device_analytics))
         .layer(middleware::from_fn(require_auth));
 
+    let device_session_protected = Router::new()
+        .route("/devices/:id/telemetry", post(handlers::upload_telemetry))
+        .route("/session/:id/telemetry", get(handlers::telemetry_ws))
+        .layer(middleware::from_fn(require_device_session));
+
     Router::new()
         .route("/devices", get(handlers::list_devices).post(handlers::register_device))
         .route(
@@ -30,14 +35,14 @@ pub fn device_routes() -> Router {
         )
         .route("/devices/search", get(handlers::search_devices))
         .route("/devices/:id/heartbeat", post(handlers::device_heartbeat))
-        .route("/devices/:id/telemetry", post(handlers::upload_telemetry))
         .route("/devices/:id/reviews", post(handlers::add_device_review).get(handlers::get_device_reviews))
         .route("/devices/:id/qr-scan", post(handlers::record_qr_scan))
         .route("/devices/:id/qr-analytics", get(handlers::get_qr_analytics))
         .route("/sessions", get(handlers::get_sessions))
         .route("/session/:id", get(handlers::get_session).delete(handlers::end_session))
         .route("/session/:id/extend", post(handlers::extend_session))
-        .route("/session/:id/telemetry", get(handlers::telemetry_ws))
+        .route("/session/:id/revoke", post(handlers::revoke_session_token))
+        .merge(device_session_protected)
         .merge(protected)
 }
 

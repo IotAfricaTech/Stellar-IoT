@@ -138,6 +138,8 @@ pub struct PaymentResponse {
     pub access_granted: bool,
     pub session_id: String,
     pub expires_at: String,
+    /// Signed JWT granting access to the device for this session.
+    pub access_token: String,
 }
 
 #[allow(dead_code)]
@@ -156,6 +158,12 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub active: bool,
+    /// Set when the session is ended or its tokens are revoked by the owner.
+    /// Revoked sessions can no longer mint or validate access tokens.
+    pub revoked: bool,
+    /// Monotonically increasing token version; bumped on refresh/revocation so
+    /// previously issued tokens can be invalidated.
+    pub token_version: u32,
 }
 
 impl Session {
@@ -169,8 +177,78 @@ impl Session {
             created_at: now,
             expires_at: now + Duration::hours(1),
             active: true,
+            revoked: false,
+            token_version: 0,
         }
     }
+}
+
+// ─── JWT Access Tokens ───────────────────────────────────────────────────────
+
+/// Claims embedded in a device-session access token (JWT).
+///
+/// The token is short-lived and grants access to a single device for the
+/// duration of a paid session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceSessionClaims {
+    /// Subject: the user's Stellar wallet address.
+    pub sub: String,
+    /// Device the token grants access to.
+    pub device_id: String,
+    /// Session the token belongs to.
+    pub session_id: String,
+    /// User's Stellar wallet address (mirrors `sub` for convenience).
+    pub user_address: String,
+    /// Issued-at time (Unix seconds).
+    pub iat: i64,
+    /// Expiry time (Unix seconds).
+    pub exp: i64,
+    /// Token kind, e.g. `access`. Optional for forward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    /// Session token version at issue time; used to invalidate stale tokens.
+    #[serde(default)]
+    pub token_version: u32,
+}
+
+/// Body of `POST /sessions/refresh` — extends a session with an additional
+/// verified payment.
+#[derive(Debug, Deserialize)]
+pub struct RefreshTokenRequest {
+    pub device_id: String,
+    pub user_address: String,
+    /// Stellar transaction hash for the additional payment.
+    pub tx_hash: String,
+    /// Amount paid for the extension.
+    pub amount: f64,
+}
+
+/// Response returned by `POST /sessions/refresh`.
+#[derive(Debug, Serialize)]
+pub struct RefreshTokenResponse {
+    pub session_id: String,
+    pub access_token: String,
+    pub expires_at: String,
+}
+
+/// Body of `POST /sessions/revoke` — revokes a session's tokens either by
+/// session id or by presenting the token itself.
+#[derive(Debug, Deserialize)]
+pub struct RevokeTokenRequest {
+    /// Session to revoke (preferred).
+    pub session_id: Option<String>,
+    /// Raw JWT to revoke; used to derive the session when `session_id` is absent.
+    pub token: Option<String>,
+    /// Owner address requesting revocation (required for owner-initiated revokes).
+    pub owner_address: Option<String>,
+}
+
+/// Response returned by `POST /sessions/revoke`.
+#[derive(Debug, Serialize)]
+pub struct RevokeTokenResponse {
+    pub session_id: String,
+    pub revoked: bool,
+    pub message: String,
 }
 
 // ─── Telemetry Data ──────────────────────────────────────────────────────────
